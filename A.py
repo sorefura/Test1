@@ -1,39 +1,18 @@
-import os
-import requests
+import time
+import sys
 
-# JFrog ArtifactoryのURLと認証情報
-ARTIFACTORY_URL = 'https://your-artifactory-domain/artifactory'
-API_URL = f'{ARTIFACTORY_URL}/api/storage'
-REPO_KEY = 'your-repo-key'
-BASE_DIR = 'your-directory-path'
-USERNAME = 'your-username'
-PASSWORD = 'your-password'
-
-def download_file(url, local_path):
-    response = requests.get(url, auth=(USERNAME, PASSWORD))
-    response.raise_for_status()
-    with open(local_path, 'wb') as file:
-        file.write(response.content)
-
-def download_directory(base_url, local_dir):
-    response = requests.get(base_url, auth=(USERNAME, PASSWORD))
-    response.raise_for_status()
-    data = response.json()
-    
-    if not os.path.exists(local_dir):
-        os.makedirs(local_dir)
-
-    for item in data['children']:
-        item_path = item['uri']
-        item_url = f"{base_url}/{item_path.lstrip('/')}"
-        local_path = os.path.join(local_dir, item_path.lstrip('/'))
-
-        if item['folder']:
-            download_directory(item_url, local_path)
-        else:
-            download_file(f"{ARTIFACTORY_URL}/{REPO_KEY}/{BASE_DIR}/{item_path.lstrip('/')}", local_path)
+def download_simulation(total_size, chunk_size):
+    downloaded_size = 0
+    while downloaded_size < total_size:
+        time.sleep(1)  # ダウンロードのシミュレーション
+        downloaded_size += chunk_size
+        if downloaded_size > total_size:
+            downloaded_size = total_size
+        progress = f"Downloaded {downloaded_size} of {total_size} bytes ({(downloaded_size / total_size) * 100:.2f}%)"
+        print(progress)
+        sys.stdout.flush()  # ここでバッファをフラッシュする
 
 if __name__ == "__main__":
-    base_url = f"{API_URL}/{REPO_KEY}/{BASE_DIR}"
-    local_dir = os.path.basename(BASE_DIR)
-    download_directory(base_url, local_dir)
+    total_size = 1024 * 1024 * 100  # 100MB
+    chunk_size = 1024 * 1024 * 10   # 10MB
+    download_simulation(total_size, chunk_size)
