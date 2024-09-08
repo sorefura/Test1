@@ -1,0 +1,51 @@
+function getRecentDatesData() {
+  const sheet = SpreadsheetApp.getActiveSpreadsheet().getSheetByName('result'); // 対象のシート名を指定
+  const start_col = 2; // 結果がある開始列番号
+  const start_row = 2; // 日付がある開始行番号
+  const lastColumn = sheet.getLastColumn() - (start_col - 1); // シートの最終列数を取得
+  const lastRow = sheet.getLastRow() - (start_row - 1); // シートの最終行数を取得
+
+  const dateRow = sheet.getRange(start_row, start_col, 1, lastColumn).getValues()[0]; // 2行目の日付を取得
+  const dataRange = sheet.getRange(start_row, start_col, lastRow, lastColumn); // 3行目以降のデータを取得
+  const data = dataRange.getValues();
+
+// 日付をDateオブジェクトに変換し、一番新しい日付を取得
+  const validDates = dateRow.map(date => new Date(date)).filter(date => !isNaN(date.getTime()));
+
+  if (validDates.length === 0) {
+    Logger.log("有効な日付が見つかりませんでした。");
+    return { data: [], row: -1, column: -1 };
+  }
+  const recentDate = new Date(Math.max(...validDates));
+
+// 直近の月曜日を探し、なければ火曜日、水曜日と探す
+  let nearestWeekday = new Date(recentDate);
+  let day = nearestWeekday.getDay();
+  let found = false;
+
+  // 最も近い月曜日の日付をnearestWeekdayにセット→date内に存在すれば処理完了 //
+  for (let i = 0; i < 7; i++) {
+    nearestWeekday.setDate(recentDate.getDate() - (day - (1 + i) + 7) % 7);
+    if (dateRow.some(date => date.getTime() === nearestWeekday.getTime())) {
+      found = true;
+      break;
+    }
+  }
+
+  if (!found) {
+    Logger.log("該当する曜日が見つかりませんでした。");
+    return { data: [], row: -1, column: -1 };
+  }
+
+// 直近の曜日から最新日付までの列を抽出
+  const resultData = [];
+  const startIndex = dateRow.findIndex(date => date.getTime() === nearestWeekday.getTime()); // 直近の週開始日のあるindexを取得 //
+  const endIndex = dateRow.findIndex(date => date.getTime() === recentDate.getTime()) + start_col; // 直近の日付のあるindexを取得 //
+
+  for (let row = 0; row < data.length; row++) {
+    resultData.push(data[row].slice(startIndex, endIndex + 1));
+  }
+
+  Logger.log({ data: resultData, row: 2, column: startIndex + 2 });
+  return { data: resultData, row: 2, column: startIndex + 2 };
+}
