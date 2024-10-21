@@ -1,154 +1,216 @@
 import tkinter as tk
 from tkinter import messagebox, Listbox, Scrollbar, Button, Frame
-import requests
 import paramiko
-import subprocess
 import logging
 import os
+import json
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
 # ロガーの設定
 logging.basicConfig(filename='app.log', level=logging.INFO)
 
-# JFrog情報
-JFROG_BASE_URL = 'https://your-jfrog-domain/artifactory/toprepository/main/'
-JFROG_CURL_PATH = os.path.join(os.getcwd(), 'DownloadFile.py')  # 現在のディレクトリにあるDownloadFile.py
+class MenuScreen:
+    def __init__(self, master):
+        self.master = master
+        self.master.title("メニュー画面")
 
-# Linux接続情報
-HOST = 'your-linux-host'
-PORT = 22
-USERNAME = 'your-username'
-PASSWORD = 'your-password'
-REMOTE_DIR = '/path/to/remote/dir'
+        self.menu_frame = Frame(self.master)
+        self.menu_frame.pack(pady=20)
 
-def get_files_in_directory(directory):
-    """指定されたディレクトリ内のファイルを取得する"""
-    try:
-        response = requests.get(f"{JFROG_BASE_URL}{directory}")
-        response.raise_for_status()
-        logging.info(f"{response.status_code()}:{JFROG_BASE_URL}{directory}")
-        files = response.json().get('children', [])
-        return [f['uri'] for f in files if not f['folder']]
-    except Exception as e:
-        logging.error(f"Error fetching files: {e}")
-        messagebox.showerror("Error", "Could not fetch files.")
-        return []
+        self.download_button = Button(self.menu_frame, text="ダウンロード", command=self.open_downloader)
+        self.download_button.pack()
 
-def download_file(file_name, progress_bar, completion_callback):
-    """選択したファイルをダウンロード"""
-    try:
-        # Paramikoで接続
-        ssh = paramiko.SSHClient()
-        ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
-        ssh.connect(HOST, PORT, USERNAME, PASSWORD)
+    def open_downloader(self):
+        """ダウンロード画面を開く"""
+        self.menu_frame.pack_forget()  # メニューを隠す
+        JFrogDownloader(self.master, self)  # JFrogDownloaderを呼び出す
 
-        sftp = ssh.open_sftp()
-        sftp.put(JFROG_CURL_PATH, os.path.join(REMOTE_DIR, 'DownloadFile.py'))
-        sftp.close()
+    def show(self):
+        """メニュー画面を表示"""
+        self.menu_frame.pack(pady=20)
 
-        # DownloadFile.pyを実行
-        command = f"python3 {os.path.join(REMOTE_DIR, 'DownloadFile.py')} {JFROG_BASE_URL}{file_name} {REMOTE_DIR}/downloaded_file_{file_name.split('/')[-1]}"
-        process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True)
+class JFrogDownloader:
+    def __init__(self, master, menu_screen):
+        self.master = master
+        self.menu_screen = menu_screen
+        
+        self.create_downloader()  # ダウンロード画面を作成
 
-        total_size = 0
-        downloaded_size = 0
+        # Script情報
+        self.info_script = 'DownloadInfo.py'
+        self.dl_script   = 'DownloadFile.py'
 
-        # 標準出力を逐次読み取る
-        for line in iter(process.stdout.readline, ""):
-            if line.strip().isdigit():
-                total_size = int(line.strip())  # 総ファイルサイズを取得
-                progress_bar['maximum'] = total_size  # プログレスバーの最大値を設定
+        # JFrog情報
+        self.JFROG_BASE_URL = 'https://your-jfrog-domain/artifactory/toprepository/main/'
+        self.JFROG_API_URL  = 'https://your-jfrog-domain/artifactory/api/storage/'
+        self.JFROG_INFO_PATH = os.path.join(os.getcwd(), self.info_script)
+        self.JFROG_CURL_PATH = os.path.join(os.getcwd(), self.dl_script)
+        self.API_KEY = "your-jfrog-api-key"
+
+        # Linux接続情報
+        self.HOST = 'your-linux-host'
+        self.PORT = 22
+        self.USERNAME = 'your-username'
+        self.PASSWORD = 'your-password'
+        self.REMOTE_PY_DIR = '/path/to/remote/dir'
+        self.REMOTE_DL_DIR = '/path/to/remote/dir/script'
+
+        # 閉じるイベントをバインド
+        self.master.protocol("WM_DELETE_WINDOW", self.on_close)
+
+    def create_downloader(self):
+        """ダウンロード画面のGUIを作成する"""
+        self.dl_listbox = Listbox(self.master, width=50, selectmode=tk.MULTIPLE)
+        self.scrollbar = Scrollbar(self.master)
+
+        self.dl_listbox.config(yscrollcommand=self.scrollbar.set)
+        self.scrollbar.config(command=self.listbox.yview)
+        
+        self.scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        self.dl_listbox.pack(side=tk.LEFT, fill=tk.BOTH)
+
+        self.download_button = Button(self.master, text="Download", command=self.on_download)
+        self.download_button.pack()
+
+        self.end_button = Button(self.master, text="終了", command=self.master.quit, state=tk.DISABLED)
+        self.end_button.pack(pady=10)
+
+        self.progress_frames = []
+
+        # ディレクトリを取得してリストボックスに追加
+        self.load_directories()
+
+    def exec_ssh(self, command):
+        """SSH経由でコマンドを実行する共通関数"""
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(self.HOST, self.PORT, self.USERNAME, self.PASSWORD)
+
+            stdin, stdout, stderr = ssh.exec_command(command)
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status != 0:
+                logging.error(f"Error executing command: {stderr.read().decode()}")
+                messagebox.showerror("Error", "Command execution failed.")
+                return None
+
+            return stdout
+
+        except paramiko.SSHException as e:
+            logging.error(f"SSH connection error: {e}")
+            messagebox.showerror("Error", "SSH connection failed.")
+            return None
+        except Exception as e:
+            logging.error(f"Unexpected error: {e}")
+            messagebox.showerror("Error", "An unexpected error occurred.")
+            return None
+
+    def load_directories(self):
+        """ディレクトリを取得してリストボックスに追加"""
+        directories = self.get_files_in_directory("")  # ルートディレクトリを取得
+        for directory in directories:
+            self.listbox.insert(tk.END, directory)
+
+    def get_files_in_directory(self, directory):
+        """指定されたディレクトリ内のファイルを取得する"""
+        try:
+            response = self.exec_ssh(f"{self.JFROG_BASE_URL}{directory}")
+            if response is None:
+                return []
+
+            files = response.json().get('children', [])
+            return [f['uri'] for f in files if not f['folder']]
+        except Exception as e:
+            logging.error(f"Error fetching files: {e}")
+            messagebox.showerror("Error", "Could not fetch files.")
+            return []
+
+    def download_file(self, file_name, progress_bar, completion_callback):
+        """選択したファイルをダウンロード"""
+        try:
+            ssh = paramiko.SSHClient()
+            ssh.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+            ssh.connect(self.HOST, self.PORT, self.USERNAME, self.PASSWORD)
+
+            sftp = ssh.open_sftp()
+            sftp.put(self.JFROG_INFO_PATH, os.path.join(self.REMOTE_PY_DIR, self.info_script))
+            sftp.put(self.JFROG_CURL_PATH, os.path.join(self.REMOTE_PY_DIR, self.dl_script))
+            sftp.close()
+
+            command = f"python3 {os.path.join(self.REMOTE_DIR, 'DownloadFile.py')} {self.JFROG_BASE_URL}{file_name} {self.REMOTE_DIR}/downloaded_file_{file_name.split('/')[-1]}"
+            stdin, stdout, stderr = ssh.exec_command(command)
+
+            total_size = 0
+            downloaded_size = 0
+
+            for line in iter(stdout.readline, ""):
+                if line.strip().isdigit():
+                    total_size = int(line.strip())
+                    progress_bar['maximum'] = total_size
+                else:
+                    if "Downloaded" in line:
+                        downloaded_size += int(line.split()[1])
+                        progress_bar['value'] = downloaded_size
+                        self.master.update_idletasks()
+
+            exit_status = stdout.channel.recv_exit_status()
+            if exit_status == 0 and downloaded_size == total_size:
+                logging.info(f"Downloaded {file_name} successfully.")
+                messagebox.showinfo("Success", f"Downloaded {file_name} successfully.")
             else:
-                # ダウンロードの進捗を更新
-                if "Downloaded" in line:
-                    downloaded_size += int(line.split()[1])  # ダウンロードされたサイズを取得
-                    progress_bar['value'] = downloaded_size  # プログレスバーを更新
-                    root.update_idletasks()  # GUIを更新
-
-        process.stdout.close()
-        process.wait()
-
-        if process.returncode == 0:
-            logging.info(f"Downloaded {file_name} successfully.")
-            messagebox.showinfo("Success", f"Downloaded {file_name} successfully.")
-        else:
-            logging.error(f"Error during file download: {process.stderr.read()}")
+                logging.error(f"Download incomplete or failed for: {file_name}.")
+                messagebox.showerror("Error", "Download incomplete or failed.")
+        except Exception as e:
+            logging.error(f"Error during file download: {e}")
             messagebox.showerror("Error", "Could not download the file.")
-    except Exception as e:
-        logging.error(f"Error during file download: {e}")
-        messagebox.showerror("Error", "Could not download the file")
-    finally:
-        ssh.close()
-        completion_callback()  # ダウンロード完了時にコールバックを呼び出す
+        finally:
+            ssh.close()
+            completion_callback()
 
-def on_download():
-    """ダウンロードボタンの処理"""
-    selected = listbox.curselection()
-    if not selected:
-        messagebox.showwarning("Warning", "Please select a directory.")
-        return
+    def on_download(self):
+        """ダウンロードボタンの処理"""
+        selected = list(self.listbox.curselection())
+        if not selected:
+            messagebox.showwarning("Warning", "Please select a directory.")
+            return
 
-    # 進捗バーをリセット
-    for frame in progress_frames:
-        frame.destroy()
-    progress_frames.clear()
+        for frame in self.progress_frames:
+            frame.destroy()
+        self.progress_frames.clear()
 
-    # スレッドプールを使用してダウンロードを実行
-    with ThreadPoolExecutor(max_workers=5) as executor:
-        futures = []
-        for index in selected:
-            file_name = listbox.get(index)
-            frame = Frame(root)
-            frame.pack(pady=5)
+        with ThreadPoolExecutor(max_workers=5) as executor:
+            futures = []
+            for index in selected:
+                file_name = self.listbox.get(index)
+                frame = Frame(self.master)
+                frame.pack(pady=5)
 
-            progress_bar = tk.Progressbar(frame, length=300)
-            progress_bar.pack()
+                progress_bar = tk.Progressbar(frame, length=300)
+                progress_bar.pack()
 
-            progress_frames.append(frame)
+                self.progress_frames.append(frame)
 
-            future = executor.submit(download_file, file_name, progress_bar, lambda: on_download_complete())
-            futures.append(future)
+                future = executor.submit(self.download_file, file_name, progress_bar, self.on_download_complete)
+                futures.append(future)
 
-        # 結果を待機
-        for future in as_completed(futures):
-            try:
-                future.result()  # 各スレッドの結果を取得（エラーがあればここで発生）
-            except Exception as e:
-                logging.error(f"Error in thread: {e}")
-                messagebox.showerror("Error", "An error occurred during download.")
+            for future in as_completed(futures):
+                try:
+                    future.result()
+                except Exception as e:
+                    logging.error(f"Error in thread: {e}")
+                    messagebox.showerror("Error", "An error occurred during download.")
 
-def on_download_complete():
-    """すべてのダウンロードが完了した時の処理"""
-    if all(progress['value'] == progress['maximum'] for frame in progress_frames for progress in frame.winfo_children() if isinstance(progress, tk.Progressbar)):
-        end_button.config(state=tk.NORMAL)
+    def on_download_complete(self):
+        """すべてのダウンロードが完了した時の処理"""
+        if all(progress['value'] == progress['maximum'] for frame in self.progress_frames for progress in frame.winfo_children() if isinstance(progress, tk.Progressbar)):
+            self.end_button.config(state=tk.NORMAL)
+
+    def on_close(self):
+        """ウィンドウを閉じる処理"""
+        self.menu_screen.show()  # メニュー画面を表示する
+        self.master.destroy()  # ダウンロード画面を閉じる
 
 # Tkinterの設定
 root = tk.Tk()
-root.title("JFrog Downloader")
-
-# リストボックスとスクロールバー
-listbox = Listbox(root, width=50, selectmode=tk.MULTIPLE)
-scrollbar = Scrollbar(root)
-listbox.config(yscrollcommand=scrollbar.set)
-scrollbar.config(command=listbox.yview)
-scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-listbox.pack(side=tk.LEFT, fill=tk.BOTH)
-
-# ダウンロードボタン
-download_button = Button(root, text="Download", command=on_download)
-download_button.pack()
-
-# 終了ボタン
-end_button = Button(root, text="終了", command=root.quit, state=tk.DISABLED)
-end_button.pack(pady=10)
-
-# プログレスバーを格納するリスト
-progress_frames = []
-
-# ディレクトリを取得してリストボックスに追加
-directories = get_files_in_directory("")  # ルートディレクトリを取得
-for directory in directories:
-    listbox.insert(tk.END, directory)
-
-# アプリケーションの開始
+menu_screen = MenuScreen(root)
 root.mainloop()
